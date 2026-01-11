@@ -27,7 +27,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-          platforms: linux/amd64,linux/arm64
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -53,6 +52,6 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: ${{ steps.meta.outputs.platforms }}
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
