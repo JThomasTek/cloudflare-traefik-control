@@ -9,25 +9,45 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func GetWANIP() string {
-	log.Debug().Msg("Checking current WAN IP")
-	res, err := http.Get("https://ipv4.icanhazip.com")
+var (
+	// wanIPURL is the service queried for the host's WAN IP. It is a package
+	// var so tests can point it at an httptest server.
+	wanIPURL = "https://ipv4.icanhazip.com"
 
+	// wanIPClient performs the WAN IP lookup with a bounded timeout so a
+	// hung remote service cannot stall the check loop indefinitely.
+	wanIPClient = &http.Client{Timeout: 10 * time.Second}
+)
+
+func GetWANIP() (string, error) {
+	log.Debug().Msg("Checking current WAN IP")
+	res, err := wanIPClient.Get(wanIPURL)
 	if err != nil {
-		log.Error().Err(err).Msg("")
+		return "", err
+	}
+	defer res.Body.Close()
+
+	resBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", err
 	}
 
-	resBody, _ := io.ReadAll(res.Body)
-
-	return strings.TrimSpace(string(resBody))
+	return strings.TrimSpace(string(resBody)), nil
 }
 
 func WanIPCheck(checkInterval int) {
 	log.Debug().Msg("Starting WAN IP check routine")
 	for {
 		time.Sleep(time.Duration(checkInterval) * time.Second)
-		log.Info().Str("WAN_IP", GetWANIP()).Msg("WAN IP check")
-		if err := CompareStateToWanIP(GetWANIP()); err != nil {
+
+		wanIP, err := GetWANIP()
+		if err != nil {
+			log.Error().Err(err).Msg("")
+			continue
+		}
+
+		log.Info().Str("WAN_IP", wanIP).Msg("WAN IP check")
+		if err := CompareStateToWanIP(wanIP); err != nil {
 			log.Error().Err(err).Msg("")
 		}
 	}
@@ -35,10 +55,10 @@ func WanIPCheck(checkInterval int) {
 
 func InitialWanIPCheck() error {
 	log.Debug().Msg("Performing initial WAN IP check")
-	err := CompareStateToWanIP(GetWANIP())
+	wanIP, err := GetWANIP()
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return CompareStateToWanIP(wanIP)
 }
