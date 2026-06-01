@@ -14,10 +14,16 @@ func GetWANIP() string {
 	res, err := http.Get("https://ipv4.icanhazip.com")
 
 	if err != nil {
-		log.Error().Err(err).Msg("")
+		log.Error().Err(err).Msg("Failed to fetch WAN IP")
+		return ""
 	}
+	defer res.Body.Close()
 
-	resBody, _ := io.ReadAll(res.Body)
+	resBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read WAN IP response")
+		return ""
+	}
 
 	return strings.TrimSpace(string(resBody))
 }

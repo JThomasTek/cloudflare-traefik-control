@@ -31,17 +31,6 @@ func InitializeCloudflareAPIToken(token string, zoneID string) error {
 	return err
 }
 
-func InitializeCloudflareAPIKey(key string, email string, zoneID string) error {
-	log.Debug().Msg("Initializing Cloudflare API with key")
-	var err error
-
-	cloudflareData.cloudflareAPI, err = cloudflare.New(key, email)
-	cloudflareData.zoneID = zoneID
-	*proxied = true
-
-	return err
-}
-
 func AddSubdomain(routerIdentifier string, rule string, wanIP string) error {
 	log.Info().Str("DNS_Record", routerIdentifier).Msg("Performing Cloudflare DNS add")
 
@@ -75,10 +64,12 @@ func UpdateWanIP(s state) error {
 			substr := record.Comment[len(commentMessage):]
 			_, ok := s.Routers[substr]
 			if ok {
-				cloudflareData.cloudflareAPI.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(cloudflareData.zoneID), cloudflare.UpdateDNSRecordParams{
-					ID:      record.ID,
-					Content: s.WanIP,
-				})
+				if _, err := cloudflareData.cloudflareAPI.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(cloudflareData.zoneID), cloudflare.UpdateDNSRecordParams{
+						ID:      record.ID,
+						Content: s.WanIP,
+					}); err != nil {
+						log.Error().Err(err).Str("DNS_Record", substr).Msg("Failed to update DNS record")
+					}
 			}
 		}
 	}

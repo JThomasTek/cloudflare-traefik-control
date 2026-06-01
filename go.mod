@@ -1,4 +1,4 @@
-module github.com/JThomasTek/traefik-config-to-cloudflare
+module github.com/JThomasTek/cloudflare-traefik-control
 
 go 1.23.0
 

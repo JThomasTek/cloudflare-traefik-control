@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"github.com/JThomasTek/traefik-config-to-cloudflare/internal"
+	"github.com/JThomasTek/cloudflare-traefik-control/internal"
 	"github.com/fsnotify/fsnotify"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"

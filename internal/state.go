@@ -72,6 +72,11 @@ func getState() (state, error) {
 		return s, err
 	}
 
+	// Ensure Routers map is initialized (fresh file or empty state has nil map)
+	if s.Routers == nil {
+		s.Routers = make(map[string]Router)
+	}
+
 	return s, nil
 }
 

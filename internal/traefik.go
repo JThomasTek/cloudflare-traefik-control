@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"math"
 	"os"
 	"regexp"
 	"sync"
@@ -87,7 +86,7 @@ func TraefikConfigWatcher(w *fsnotify.Watcher, filename string, hostIgnoreRegex 
 				mu.Unlock()
 
 				if !ok {
-					t = time.AfterFunc(math.MaxInt64, func() { eventHandler(event) })
+					t = time.AfterFunc(time.Hour*24*365*100, func() { eventHandler(event) })
 					t.Stop()
 
 					mu.Lock()
