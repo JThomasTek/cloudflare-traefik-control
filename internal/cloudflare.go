@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cloudflare/cloudflare-go"
 	"github.com/rs/zerolog/log"
@@ -62,6 +63,17 @@ func AddSubdomain(routerIdentifier string, rule string, wanIP string) error {
 	return nil
 }
 
+// parseRouterFromComment extracts the router identifier from a Cloudflare DNS
+// record comment that CTC owns. It returns (identifier, true) only for comments
+// carrying the commentMessage prefix, and ("", false) otherwise.
+func parseRouterFromComment(comment string) (string, bool) {
+	if !strings.HasPrefix(comment, commentMessage) {
+		return "", false
+	}
+
+	return comment[len(commentMessage):], true
+}
+
 func UpdateWanIP(s state) error {
 	ctx := context.Background()
 
@@ -71,14 +83,18 @@ func UpdateWanIP(s state) error {
 	}
 
 	for _, record := range records {
-		if len(record.Comment) >= 15 {
-			substr := record.Comment[len(commentMessage):]
-			_, ok := s.Routers[substr]
-			if ok {
-				cloudflareData.cloudflareAPI.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(cloudflareData.zoneID), cloudflare.UpdateDNSRecordParams{
-					ID:      record.ID,
-					Content: s.WanIP,
-				})
+		routerIdentifier, ok := parseRouterFromComment(record.Comment)
+		if !ok {
+			continue
+		}
+
+		if _, ok := s.Routers[routerIdentifier]; ok {
+			_, err := cloudflareData.cloudflareAPI.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(cloudflareData.zoneID), cloudflare.UpdateDNSRecordParams{
+				ID:      record.ID,
+				Content: s.WanIP,
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -116,16 +132,14 @@ func DeleteSubdomain(routerIdentifier string) error {
 	}
 
 	for _, record := range records {
-		if len(record.Comment) >= len(commentMessage) {
-			substr := record.Comment[len(commentMessage):]
-			if substr == routerIdentifier {
-				err = cloudflareData.cloudflareAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(cloudflareData.zoneID), record.ID)
-				if err != nil {
-					return err
-				}
-
-				break
+		recordRouter, ok := parseRouterFromComment(record.Comment)
+		if ok && recordRouter == routerIdentifier {
+			err = cloudflareData.cloudflareAPI.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(cloudflareData.zoneID), record.ID)
+			if err != nil {
+				return err
 			}
+
+			break
 		}
 	}
 

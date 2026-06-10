@@ -25,7 +25,7 @@ keeping a local state file.
 
 - Go module path: `github.com/JThomasTek/traefik-config-to-cloudflare` (note:
   this differs from the repo name `cloudflare-traefik-control`).
-- Go version: `go 1.23.0` (toolchain `go1.24.6`).
+- Go version: `go 1.25.0` (toolchain `go1.25.11`).
 - Published images: `ghcr.io/jthomastek/cloudflare-traefik-control` and
   `jthomastek/cloudflare-traefik-control` (Docker Hub).
 - License: MIT.
@@ -39,12 +39,20 @@ internal/              All application logic (single package `internal`)
   traefik.go           Traefik config parsing + fsnotify file watcher
   wan_ip.go            WAN IP lookup + polling loop
   state.go             State file (read/write) + reconciliation logic
+  *_test.go            Unit tests (state, wan_ip, traefik, cloudflare)
 Dockerfile             Multi-stage build (golang:alpine -> alpine:latest)
 .github/workflows/     CI: build-image (PR/push), publish-image (release)
 .vscode/launch.json    Local debug launch config with sample env vars
 ```
 
-There are currently **no tests** and **no test files** in the repo.
+Unit tests live alongside the source in `internal/*_test.go` (white-box, package
+`internal`). They cover the pure/parsing logic (`cleanRule`,
+`parseRouterFromComment`, Traefik config parsing), state file round-tripping, the
+WAN IP fetch (via `httptest`), and the reconciliation logic in
+`CompareStateToConfig` / `CompareStateToWanIP`. The Cloudflare API calls are
+swapped out in tests through package-level function vars (`addSubdomain`,
+`deleteSubdomain`, `updateWanIP`) so reconcile logic is testable without network
+access. Run with `go test -race ./...`.
 
 ## How it works (control flow)
 
@@ -141,9 +149,11 @@ state files.
 
 ## CI / release
 
-- `.github/workflows/build-image.yaml`: builds the multi-arch image
-  (`linux/amd64,linux/arm64`) on pushes/PRs to `main` and `develop`. Does **not**
-  push (`push: false`) — it's a build verification gate.
+- `.github/workflows/build-image.yaml`: first runs a `test` job
+  (`go vet`, `go test -race`, `govulncheck`), then builds the multi-arch image
+  (`linux/amd64,linux/arm64`) on pushes/PRs to `main` and `develop`. The image
+  build `needs: test`, so it only runs when tests pass. Does **not** push
+  (`push: false`) — it's a build/test verification gate.
 - `.github/workflows/publish-image.yaml`: on a published GitHub **release**,
   builds and pushes multi-arch images to GHCR and Docker Hub with semver tags.
 - Versioning is driven by GitHub releases (semver tags); there is no separate
@@ -184,5 +194,6 @@ state files.
   permission, and do not open PRs unless asked.
 - When you change behavior or configuration, update **both** this file and
   `README.md` so the two don't drift.
-- There are no automated tests; if you add functionality, consider adding
-  `go test` coverage and a CI test step.
+- Unit tests live in `internal/*_test.go`; keep them green (`go test -race ./...`)
+  and add coverage when you add functionality. The `build-image` workflow runs
+  `go vet`, `go test -race`, and `govulncheck` as a gate before the image build.

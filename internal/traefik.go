@@ -102,7 +102,7 @@ func TraefikConfigWatcher(w *fsnotify.Watcher, filename string, hostIgnoreRegex 
 				return
 			}
 
-			log.Error().Err(err)
+			log.Error().Err(err).Msg("")
 		}
 	}
 }

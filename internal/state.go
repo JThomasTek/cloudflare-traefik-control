@@ -15,6 +15,12 @@ var (
 	stateFolder = "/etc/ctc/"
 	stateFile   = stateFolder + "state.yml"
 	mu          sync.Mutex
+
+	// Cloudflare operations are referenced through these vars so tests can
+	// stub them without making real API calls.
+	addSubdomain    = AddSubdomain
+	deleteSubdomain = DeleteSubdomain
+	updateWanIP     = UpdateWanIP
 )
 
 type state struct {
@@ -27,7 +33,7 @@ func generateState() error {
 
 	// First check if directory exists and if not then create it
 	if _, err := os.Stat(stateFolder); os.IsNotExist(err) {
-		err = os.Mkdir(stateFolder, 0744)
+		err = os.Mkdir(stateFolder, 0700)
 		if err != nil {
 			return err
 		}
@@ -72,6 +78,12 @@ func getState() (state, error) {
 		return s, err
 	}
 
+	// Ensure the map is always usable so callers can assign to it without
+	// risking a nil-map panic (e.g. on a freshly created/empty state file).
+	if s.Routers == nil {
+		s.Routers = make(map[string]Router)
+	}
+
 	return s, nil
 }
 
@@ -84,7 +96,7 @@ func writeState(newState state) error {
 	}
 
 	mu.Lock()
-	err = os.WriteFile(stateFile, data, 0644)
+	err = os.WriteFile(stateFile, data, 0600)
 	mu.Unlock()
 	if err != nil {
 		return err
@@ -93,12 +105,21 @@ func writeState(newState state) error {
 	return nil
 }
 
-func cleanRule(rule string) string {
-	hostStartIndex := strings.Index(rule, "Host(`") + 6
-	hostEndIndex := strings.Index(rule[hostStartIndex:], "`)") + hostStartIndex
-	hostSubstr := rule[hostStartIndex:hostEndIndex]
+func cleanRule(rule string) (string, error) {
+	const hostMarker = "Host(`"
 
-	return hostSubstr
+	markerIndex := strings.Index(rule, hostMarker)
+	if markerIndex == -1 {
+		return "", fmt.Errorf("rule %q does not contain a Host(`...`) clause", rule)
+	}
+
+	hostStartIndex := markerIndex + len(hostMarker)
+	endOffset := strings.Index(rule[hostStartIndex:], "`)")
+	if endOffset == -1 {
+		return "", fmt.Errorf("rule %q has an unterminated Host(`...`) clause", rule)
+	}
+
+	return rule[hostStartIndex : hostStartIndex+endOffset], nil
 }
 
 func CompareStateToConfig(config TraefikConfig, hostIgnoreRegex *regexp.Regexp) error {
@@ -115,19 +136,26 @@ func CompareStateToConfig(config TraefikConfig, hostIgnoreRegex *regexp.Regexp) 
 	for k, v := range config.HTTP.Routers {
 		_, ok := s.Routers[k]
 		if !ok {
+			host, err := cleanRule(v.Rule)
+			if err != nil {
+				log.Error().Err(err).Msg("")
+				continue
+			}
+
 			// Only add subdomain if it doesn't match the ignore regex
-			if !hostIgnoreRegex.MatchString(cleanRule(v.Rule)) {
-				// Add the subdomain to the state file
+			if !hostIgnoreRegex.MatchString(host) {
+				// Perform Cloudflare DNS add; only record the router in the
+				// state file once Cloudflare confirms the record was created,
+				// so a failed add does not leave state out of sync.
+				if err = addSubdomain(k, host, s.WanIP); err != nil {
+					log.Error().Err(err).Msg("")
+					continue
+				}
+
 				s.Routers[k] = v
 				changed = true
-
-				// Perform Cloudflare DNS add
-				err = AddSubdomain(k, cleanRule(v.Rule), s.WanIP)
-				if err != nil {
-					log.Error().Err(err).Msg("")
-				}
 			} else {
-				log.Debug().Msg(fmt.Sprintf("Ignoring subdomain %s", cleanRule(v.Rule)))
+				log.Debug().Msg(fmt.Sprintf("Ignoring subdomain %s", host))
 			}
 		}
 	}
@@ -136,14 +164,15 @@ func CompareStateToConfig(config TraefikConfig, hostIgnoreRegex *regexp.Regexp) 
 	for k := range s.Routers {
 		_, ok := config.HTTP.Routers[k]
 		if !ok {
+			// Perform Cloudflare DNS remove; only drop the router from the
+			// state file once the delete succeeds.
+			if err = deleteSubdomain(k); err != nil {
+				log.Error().Err(err).Msg("")
+				continue
+			}
+
 			delete(s.Routers, k)
 			changed = true
-
-			// Perform Cloudflare DNS remove
-			err = DeleteSubdomain(k)
-			if err != nil {
-				log.Error().Err(err).Msg("")
-			}
 		}
 	}
 
@@ -168,10 +197,12 @@ func CompareStateToWanIP(wanIP string) error {
 	if s.WanIP != wanIP {
 		s.WanIP = wanIP
 
-		// Update Cloudflare DNS records with new WAN IP
-		err = UpdateWanIP(s)
-		if err != nil {
-			log.Error().Err(err).Msg("")
+		// Update Cloudflare DNS records with the new WAN IP. Only persist the
+		// new IP to the state file once the update succeeds; otherwise a
+		// transient failure would be masked on the next loop (no IP change
+		// detected) and the DNS records would stay stale.
+		if err = updateWanIP(s); err != nil {
+			return err
 		}
 
 		if err = writeState(s); err != nil {

@@ -70,8 +70,7 @@ func main() {
 	}
 
 	// Run initial config check
-	internal.InitialConfigCheck(traefikConfigFile, hostIgnoreRegex)
-	if err != nil {
+	if err = internal.InitialConfigCheck(traefikConfigFile, hostIgnoreRegex); err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
@@ -106,5 +105,5 @@ func main() {
 	}
 
 	// Run in an infinite loop
-	<-make(chan struct{})
+	select {}
 }
