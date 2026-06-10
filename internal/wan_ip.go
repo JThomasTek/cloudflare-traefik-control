@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,10 @@ func GetWANIP() (string, error) {
 		return "", err
 	}
 	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("WAN IP lookup returned unexpected status %d", res.StatusCode)
+	}
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {

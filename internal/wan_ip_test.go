@@ -36,6 +36,20 @@ func TestGetWANIP_Success(t *testing.T) {
 	}
 }
 
+func TestGetWANIP_Non200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	useWANIPServer(t, srv)
+
+	// A non-200 response must not be trimmed and returned as if it were an IP.
+	got, err := GetWANIP()
+	if err == nil {
+		t.Fatalf("GetWANIP() expected an error on HTTP 500, got %q", got)
+	}
+}
+
 func TestGetWANIP_HTTPError(t *testing.T) {
 	// Start a server then close it so the request fails at the transport level.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

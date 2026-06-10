@@ -291,6 +291,28 @@ func TestCompareStateToWanIP_UpdatesOnChange(t *testing.T) {
 	}
 }
 
+func TestCompareStateToWanIP_FailedUpdateNotPersisted(t *testing.T) {
+	useTempState(t)
+
+	if err := writeState(state{WanIP: "203.0.113.1", Routers: map[string]Router{}}); err != nil {
+		t.Fatalf("seeding state: %v", err)
+	}
+
+	stubCloudflare(t, nil, nil, func(s state) error {
+		return errStub
+	})
+
+	if err := CompareStateToWanIP("203.0.113.2"); err == nil {
+		t.Fatal("expected an error to propagate when updateWanIP fails")
+	}
+
+	// The new IP must NOT be persisted, so the next loop retries the update.
+	s, _ := getState()
+	if s.WanIP != "203.0.113.1" {
+		t.Errorf("state WanIP = %q, want unchanged %q after failed update", s.WanIP, "203.0.113.1")
+	}
+}
+
 func TestCompareStateToWanIP_NoChangeSkipsUpdate(t *testing.T) {
 	useTempState(t)
 

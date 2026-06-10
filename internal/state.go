@@ -197,10 +197,12 @@ func CompareStateToWanIP(wanIP string) error {
 	if s.WanIP != wanIP {
 		s.WanIP = wanIP
 
-		// Update Cloudflare DNS records with new WAN IP
-		err = updateWanIP(s)
-		if err != nil {
-			log.Error().Err(err).Msg("")
+		// Update Cloudflare DNS records with the new WAN IP. Only persist the
+		// new IP to the state file once the update succeeds; otherwise a
+		// transient failure would be masked on the next loop (no IP change
+		// detected) and the DNS records would stay stale.
+		if err = updateWanIP(s); err != nil {
+			return err
 		}
 
 		if err = writeState(s); err != nil {
