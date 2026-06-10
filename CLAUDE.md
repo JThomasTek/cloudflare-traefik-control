@@ -25,7 +25,7 @@ keeping a local state file.
 
 - Go module path: `github.com/JThomasTek/traefik-config-to-cloudflare` (note:
   this differs from the repo name `cloudflare-traefik-control`).
-- Go version: `go 1.25.0` (toolchain `go1.25.10`).
+- Go version: `go 1.25.0` (toolchain `go1.25.11`).
 - Published images: `ghcr.io/jthomastek/cloudflare-traefik-control` and
   `jthomastek/cloudflare-traefik-control` (Docker Hub).
 - License: MIT.

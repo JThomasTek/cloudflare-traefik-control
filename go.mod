@@ -2,7 +2,7 @@ module github.com/JThomasTek/traefik-config-to-cloudflare
 
 go 1.25.0
 
-toolchain go1.25.10
+toolchain go1.25.11
 
 require (
 	github.com/cloudflare/cloudflare-go v0.117.0
