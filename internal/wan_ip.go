@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,7 +41,7 @@ func GetWANIP() (string, error) {
 	return strings.TrimSpace(string(resBody)), nil
 }
 
-func WanIPCheck(checkInterval int) {
+func (r *Reconciler) WanIPCheck(ctx context.Context, checkInterval int) {
 	log.Debug().Msg("Starting WAN IP check routine")
 	for {
 		time.Sleep(time.Duration(checkInterval) * time.Second)
@@ -52,18 +53,18 @@ func WanIPCheck(checkInterval int) {
 		}
 
 		log.Info().Str("WAN_IP", wanIP).Msg("WAN IP check")
-		if err := CompareStateToWanIP(wanIP); err != nil {
+		if err := r.CompareStateToWanIP(ctx, wanIP); err != nil {
 			log.Error().Err(err).Msg("")
 		}
 	}
 }
 
-func InitialWanIPCheck() error {
+func (r *Reconciler) InitialWanIPCheck(ctx context.Context) error {
 	log.Debug().Msg("Performing initial WAN IP check")
 	wanIP, err := GetWANIP()
 	if err != nil {
 		return err
 	}
 
-	return CompareStateToWanIP(wanIP)
+	return r.CompareStateToWanIP(ctx, wanIP)
 }

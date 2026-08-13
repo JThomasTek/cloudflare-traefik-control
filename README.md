@@ -44,3 +44,12 @@ services:
 The `TRAEFIK_HOST_IGNORE_REGEX` tells CTC which routes to ignore in the config.yaml file. This can be useful if you have a local DNS that handles routes that you do not want added to Cloudflare.
 
 At this time, the application only supports providing a Cloudflare API token. If there is large interest in there being API key support then it will be implemented.
+
+## Which records CTC touches
+
+CTC only ever changes records it created itself. Every record it adds carries the comment `Managed by ctc: <router name>`, and that comment is how it recognises its own work later. Records you created by hand are left alone, even if they share a hostname with a Traefik route.
+
+Two consequences worth knowing:
+
+- When your WAN IP changes, CTC repoints **every** record carrying that comment — including one whose Traefik router you have since deleted but whose record was never cleaned up. A record still carrying CTC's comment is still CTC's to maintain.
+- If you edit or remove the comment on a record, CTC stops recognising it and will neither update nor delete it again.
