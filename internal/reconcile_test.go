@@ -115,6 +115,10 @@ func TestCompareStateToConfig_IgnoredRouterNotAdded(t *testing.T) {
 
 	r, zone := newTestReconciler(t, "", `^[a-zA-Z0-9-]+\.local\.example\.com$`)
 
+	// A WAN IP is required for the add path to run at all; without one the
+	// deferral guard would make this assertion pass for the wrong reason.
+	seedState(t, r.store, "203.0.113.1", nil)
+
 	cfg := TraefikConfig{}
 	cfg.HTTP.Routers = map[string]Router{"local": {Rule: "Host(`x.local.example.com`)"}}
 
@@ -135,6 +139,9 @@ func TestCompareStateToConfig_FailedAddNotRecorded(t *testing.T) {
 
 	r, zone := newTestReconciler(t, "", "^$")
 	zone.addErr = errStub
+
+	// As above: without a WAN IP the add would be deferred rather than failed.
+	seedState(t, r.store, "203.0.113.1", nil)
 
 	cfg := TraefikConfig{}
 	cfg.HTTP.Routers = map[string]Router{"web": {Rule: "Host(`web.example.com`)"}}
@@ -188,6 +195,39 @@ func TestCompareStateToConfig_FailedDeleteKeepsState(t *testing.T) {
 
 	if _, ok := snapshot(t, r.store).Routers["old"]; !ok {
 		t.Error("router must remain in state when the zone delete fails")
+	}
+}
+
+// Both halves matter. Skipping the adds is the point, but the removals have to
+// keep running: a guard placed over the whole reconcile would pass the first
+// assertion and silently strand records whose routers are gone.
+func TestCompareStateToConfig_NoWanIPDefersAddsButStillRemoves(t *testing.T) {
+	t.Parallel()
+
+	r, zone := newTestReconciler(t, "", "^$")
+
+	// No WAN IP: this is a fresh state file, before the first WAN IP check.
+	seedState(t, r.store, "", map[string]Router{"old": {Rule: "Host(`old.example.com`)"}})
+
+	cfg := TraefikConfig{}
+	cfg.HTTP.Routers = map[string]Router{"new": {Rule: "Host(`new.example.com`)"}}
+
+	if err := r.CompareStateToConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("CompareStateToConfig() error: %v", err)
+	}
+
+	if len(zone.adds) != 0 {
+		t.Errorf("no record may be added before the WAN IP is known, got %v", zone.adds)
+	}
+	if _, ok := snapshot(t, r.store).Routers["new"]; ok {
+		t.Error("a deferred router must not be recorded in state, or it is never revisited")
+	}
+
+	if len(zone.removes) != 1 || zone.removes[0] != "old" {
+		t.Fatalf("removals must run without a WAN IP, got %v", zone.removes)
+	}
+	if _, ok := snapshot(t, r.store).Routers["old"]; ok {
+		t.Error("expected 'old' to be removed from state after successful delete")
 	}
 }
 

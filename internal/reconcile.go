@@ -61,35 +61,51 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 		return err
 	}
 
-	// Check if any new subdomains were added to the config
-	for k, v := range config.HTTP.Routers {
-		if _, ok := s.Routers[k]; ok {
-			continue
-		}
+	// Adding a record means naming an address for it, and until the first WAN IP
+	// check has landed we do not have one. Creating the record anyway would
+	// point it at nothing, and the router would then be recorded in the state
+	// file, so no later reconcile would revisit it. Defer the adds instead.
+	//
+	// Startup checks the WAN IP before it reconciles the config, so this only
+	// guards against a future caller getting that order wrong — but the cost of
+	// it going unguarded is a zone full of records pointing nowhere.
+	if s.WanIP == "" {
+		log.Warn().Msg("No WAN IP known yet, deferring router adds")
+	} else {
+		// Check if any new subdomains were added to the config
+		for k, v := range config.HTTP.Routers {
+			if _, ok := s.Routers[k]; ok {
+				continue
+			}
 
-		host, err := cleanRule(v.Rule)
-		if err != nil {
-			log.Error().Err(err).Msg("")
-			continue
-		}
+			host, err := cleanRule(v.Rule)
+			if err != nil {
+				log.Error().Err(err).Msg("")
+				continue
+			}
 
-		// Only add subdomain if it doesn't match the ignore regex
-		if r.hostIgnoreRegex.MatchString(host) {
-			log.Debug().Msgf("Ignoring subdomain %s", host)
-			continue
-		}
+			// Only add subdomain if it doesn't match the ignore regex
+			if r.hostIgnoreRegex.MatchString(host) {
+				log.Debug().Msgf("Ignoring subdomain %s", host)
+				continue
+			}
 
-		// Only record the router in the state file once the zone confirms the
-		// record was created, so a failed add does not leave state out of sync.
-		if err := r.zone.Add(ctx, k, host, s.WanIP); err != nil {
-			log.Error().Err(err).Msg("")
-			continue
-		}
+			// Only record the router in the state file once the zone confirms
+			// the record was created, so a failed add does not leave state out
+			// of sync.
+			if err := r.zone.Add(ctx, k, host, s.WanIP); err != nil {
+				log.Error().Err(err).Msg("")
+				continue
+			}
 
-		if err := r.store.RecordRouter(k, v); err != nil {
-			return err
+			if err := r.store.RecordRouter(k, v); err != nil {
+				return err
+			}
 		}
 	}
+
+	// Removals run whether or not we know our own address — deleting a record
+	// does not need one.
 
 	// Check if any subdomains were removed from the config
 	for k := range s.Routers {
