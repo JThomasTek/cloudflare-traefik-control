@@ -1,9 +1,11 @@
 package internal
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // useWANIPServer points the WAN IP lookup at the given handler for the test.
@@ -60,5 +62,28 @@ func TestGetWANIP_HTTPError(t *testing.T) {
 	got, err := GetWANIP()
 	if err == nil {
 		t.Fatalf("GetWANIP() expected an error after server shutdown, got %q", got)
+	}
+}
+
+func TestWatchWanIP_StopsOnContextCancel(t *testing.T) {
+	// The interval is deliberately far longer than the test is willing to wait:
+	// cancellation must be noticed while the loop is between ticks, not only
+	// once a tick has fired.
+	r, _ := newTestReconciler(t, "", "^$")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		r.WatchWanIP(ctx, time.Hour)
+	}()
+
+	cancel()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchWanIP() did not return after its context was cancelled")
 	}
 }

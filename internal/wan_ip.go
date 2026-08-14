@@ -41,10 +41,26 @@ func GetWANIP() (string, error) {
 	return strings.TrimSpace(string(resBody)), nil
 }
 
-func (r *Reconciler) WanIPCheck(ctx context.Context, checkInterval int) {
+// WatchWanIP reconciles the zone against the host's WAN IP every interval,
+// until ctx is cancelled. The first check is the caller's to make: this loop
+// waits out one interval before doing anything.
+//
+// The wait is a ticker rather than a sleep so that cancellation is noticed at
+// once. A sleeping goroutine cannot be selected on, and would sit through the
+// remainder of the interval before returning.
+func (r *Reconciler) WatchWanIP(ctx context.Context, interval time.Duration) {
 	log.Debug().Msg("Starting WAN IP check routine")
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
 	for {
-		time.Sleep(time.Duration(checkInterval) * time.Second)
+		select {
+		case <-ctx.Done():
+			log.Debug().Msg("Stopping WAN IP check routine")
+			return
+		case <-ticker.C:
+		}
 
 		wanIP, err := GetWANIP()
 		if err != nil {

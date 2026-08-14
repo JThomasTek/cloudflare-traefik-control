@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"syscall"
+	"time"
 
 	"github.com/JThomasTek/traefik-config-to-cloudflare/internal"
 	"github.com/fsnotify/fsnotify"
@@ -73,7 +76,11 @@ func main() {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	ctx := context.Background()
+	// Cancelled on SIGINT/SIGTERM so a `docker stop` unwinds the reconcile
+	// loops instead of having the process killed part-way through one.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	reconciler := internal.NewReconciler(zone, store, traefikConfigFile, hostIgnoreRegex)
 
 	// Run initial WAN IP check
@@ -97,8 +104,8 @@ func main() {
 
 	// Start go routines for watching WAN IP and Traefik config changes
 	log.Info().Msg("Watching for config changes")
-	go reconciler.TraefikConfigWatcher(ctx, traefikConfigWatcher)
-	go reconciler.WanIPCheck(ctx, 60)
+	go reconciler.WatchTraefikConfig(ctx, traefikConfigWatcher)
+	go reconciler.WatchWanIP(ctx, 60*time.Second)
 
 	// Get config file info
 	configFileInfo, err := os.Lstat(traefikConfigFile)
@@ -117,6 +124,7 @@ func main() {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	// Run in an infinite loop
-	select {}
+	// Block until a signal cancels the context, then let the watchers unwind.
+	<-ctx.Done()
+	log.Info().Msg("Shutting down")
 }

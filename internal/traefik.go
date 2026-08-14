@@ -59,7 +59,11 @@ func (r *Reconciler) handleConfigChange(ctx context.Context) {
 	}
 }
 
-func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watcher) {
+// WatchTraefikConfig reconciles the zone whenever the Traefik config file is
+// written, until w is closed. Writes are debounced: each event resets a 100ms
+// timer, so an editor or a template renderer touching the file several times in
+// quick succession produces one reconcile.
+func (r *Reconciler) WatchTraefikConfig(ctx context.Context, w *fsnotify.Watcher) {
 	var (
 		// Wait 100ms for new events; each new event resets the timer.
 		waitTime = 100 * time.Millisecond
