@@ -83,14 +83,17 @@ func main() {
 
 	reconciler := internal.NewReconciler(zone, store, traefikConfigFile, hostIgnoreRegex)
 
-	// Run initial WAN IP check
-	err = reconciler.InitialWanIPCheck(ctx)
-	if err != nil {
+	// Establish the starting position before anything starts watching. The WAN
+	// IP comes first: reconciling the config without one defers every add.
+	//
+	// Both are fatal. Reconciliation is only ever driven by events from here on
+	// (see docs/adr/0001), so there is nothing that would retry a failed start
+	// — exiting hands that job to the container's restart policy.
+	if err = reconciler.ReconcileWanIP(ctx); err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	// Run initial config check
-	if err = reconciler.InitialConfigCheck(ctx); err != nil {
+	if err = reconciler.ReconcileConfig(ctx); err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
@@ -107,18 +110,14 @@ func main() {
 	go reconciler.WatchTraefikConfig(ctx, traefikConfigWatcher)
 	go reconciler.WatchWanIP(ctx, 60*time.Second)
 
-	// Get config file info
-	configFileInfo, err := os.Lstat(traefikConfigFile)
-	if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
-
-	// Verify the file provided is not a directory
-	if configFileInfo.IsDir() {
-		log.Fatal().Msgf("%s is a directory\n", traefikConfigFile)
-	}
-
-	// Add the config file to the watcher
+	// The config file itself is not checked here: the reconcile above already
+	// read it, and failed fatally if it was missing, unreadable, or a
+	// directory.
+	//
+	// The directory is what gets watched, not the file — editors and template
+	// renderers replace config files rather than writing them in place, and a
+	// watch on the old inode would go quiet after the first such write.
+	// WatchTraefikConfig filters events back down to the config file.
 	err = traefikConfigWatcher.Add(filepath.Dir(traefikConfigFile))
 	if err != nil {
 		log.Fatal().Err(err).Msg("")

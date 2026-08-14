@@ -49,7 +49,37 @@ func cleanRule(rule string) (string, error) {
 	return rule[hostStartIndex : hostStartIndex+endOffset], nil
 }
 
-func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikConfig) error {
+// ReconcileConfig brings the zone into agreement with the Traefik config file.
+// It is the whole config-driven reconcile: startup and the file watcher both
+// call this and nothing else.
+func (r *Reconciler) ReconcileConfig(ctx context.Context) error {
+	config, err := readTraefikConfig(r.configFile)
+	if err != nil {
+		// Stop here rather than reconciling against the zero value. An
+		// unreadable or half-written config parses to no routers at all, which
+		// the reconcile would read as "every router was removed" and delete
+		// every record CTC manages in the zone.
+		return err
+	}
+
+	return r.compareStateToConfig(ctx, config)
+}
+
+// ReconcileWanIP brings the zone into agreement with the host's current WAN IP.
+// It is the whole WAN-driven reconcile: startup and the check loop both call
+// this and nothing else.
+func (r *Reconciler) ReconcileWanIP(ctx context.Context) error {
+	wanIP, err := GetWANIP()
+	if err != nil {
+		return err
+	}
+
+	log.Info().Str("WAN_IP", wanIP).Msg("WAN IP check")
+
+	return r.compareStateToWanIP(ctx, wanIP)
+}
+
+func (r *Reconciler) compareStateToConfig(ctx context.Context, config TraefikConfig) error {
 	log.Debug().Msg("Comparing state file to config")
 
 	// A snapshot is enough to decide what to do. Each change is committed on
@@ -127,7 +157,7 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 	return nil
 }
 
-func (r *Reconciler) CompareStateToWanIP(ctx context.Context, wanIP string) error {
+func (r *Reconciler) compareStateToWanIP(ctx context.Context, wanIP string) error {
 	log.Debug().Msg("Comparing state file WAN IP to actual WAN IP")
 
 	s, err := r.store.Snapshot()

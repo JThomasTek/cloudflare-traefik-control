@@ -62,25 +62,8 @@ func (r *Reconciler) WatchWanIP(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 		}
 
-		wanIP, err := GetWANIP()
-		if err != nil {
-			log.Error().Err(err).Msg("")
-			continue
-		}
-
-		log.Info().Str("WAN_IP", wanIP).Msg("WAN IP check")
-		if err := r.CompareStateToWanIP(ctx, wanIP); err != nil {
+		if err := r.ReconcileWanIP(ctx); err != nil {
 			log.Error().Err(err).Msg("")
 		}
 	}
-}
-
-func (r *Reconciler) InitialWanIPCheck(ctx context.Context) error {
-	log.Debug().Msg("Performing initial WAN IP check")
-	wanIP, err := GetWANIP()
-	if err != nil {
-		return err
-	}
-
-	return r.CompareStateToWanIP(ctx, wanIP)
 }

@@ -32,6 +32,6 @@ that runs managing nothing.
 
 Because nothing re-triggers a config reconcile except a write to the config
 file, a reconcile that silently does less than it should is not self-correcting.
-`CompareStateToConfig` therefore defers adds when no WAN IP is known rather than
+`compareStateToConfig` therefore defers adds when no WAN IP is known rather than
 creating records that point at nothing — a record created wrong would be
 recorded in the state file and never revisited.

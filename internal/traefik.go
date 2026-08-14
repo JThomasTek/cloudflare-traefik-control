@@ -41,24 +41,6 @@ func readTraefikConfig(filename string) (TraefikConfig, error) {
 	return config, nil
 }
 
-func (r *Reconciler) handleConfigChange(ctx context.Context) {
-	log.Debug().Msg("Handling config change")
-	traefikConfig, err := readTraefikConfig(r.configFile)
-	if err != nil {
-		// Stop here rather than reconciling against the zero value. An
-		// unreadable or half-written config parses to no routers at all, which
-		// the reconcile would read as "every router was removed" and delete
-		// every record CTC manages in the zone.
-		log.Error().Err(err).Msg("")
-		return
-	}
-
-	err = r.CompareStateToConfig(ctx, traefikConfig)
-	if err != nil {
-		log.Error().Err(err).Msg("")
-	}
-}
-
 // WatchTraefikConfig reconciles the zone whenever the Traefik config file is
 // written, until w is closed. Writes are debounced: each event resets a 100ms
 // timer, so an editor or a template renderer touching the file several times in
@@ -74,7 +56,10 @@ func (r *Reconciler) WatchTraefikConfig(ctx context.Context, w *fsnotify.Watcher
 
 		// Callback we run.
 		eventHandler = func(e fsnotify.Event) {
-			r.handleConfigChange(ctx)
+			log.Debug().Msg("Handling config change")
+			if err := r.ReconcileConfig(ctx); err != nil {
+				log.Error().Err(err).Msg("")
+			}
 
 			timersMu.Lock()
 			delete(timers, e.Name)
@@ -114,19 +99,4 @@ func (r *Reconciler) WatchTraefikConfig(ctx context.Context, w *fsnotify.Watcher
 			log.Error().Err(err).Msg("")
 		}
 	}
-}
-
-func (r *Reconciler) InitialConfigCheck(ctx context.Context) error {
-	log.Debug().Msg("Initial config check")
-	traefikConfig, err := readTraefikConfig(r.configFile)
-	if err != nil {
-		return err
-	}
-
-	err = r.CompareStateToConfig(ctx, traefikConfig)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

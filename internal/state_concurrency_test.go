@@ -40,21 +40,21 @@ func TestReconcile_ConcurrentPathsDoNotLoseEachOthersWrites(t *testing.T) {
 
 	configDone := make(chan error, 1)
 	go func() {
-		configDone <- r.CompareStateToConfig(context.Background(), cfg)
+		configDone <- r.compareStateToConfig(context.Background(), cfg)
 	}()
 
 	// Wait until the config reconcile is mid-flight, then run the WAN IP
 	// reconcile all the way through underneath it.
 	<-addEntered
 
-	if err := r.CompareStateToWanIP(context.Background(), newIP); err != nil {
-		t.Fatalf("CompareStateToWanIP() error: %v", err)
+	if err := r.compareStateToWanIP(context.Background(), newIP); err != nil {
+		t.Fatalf("compareStateToWanIP() error: %v", err)
 	}
 
 	close(releaseAdd)
 
 	if err := <-configDone; err != nil {
-		t.Fatalf("CompareStateToConfig() error: %v", err)
+		t.Fatalf("compareStateToConfig() error: %v", err)
 	}
 
 	s := snapshot(t, r.store)

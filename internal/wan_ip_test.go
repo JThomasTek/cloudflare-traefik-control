@@ -66,6 +66,8 @@ func TestGetWANIP_HTTPError(t *testing.T) {
 }
 
 func TestWatchWanIP_StopsOnContextCancel(t *testing.T) {
+	t.Parallel()
+
 	// The interval is deliberately far longer than the test is willing to wait:
 	// cancellation must be noticed while the loop is between ticks, not only
 	// once a tick has fired.
