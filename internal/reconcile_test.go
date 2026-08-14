@@ -6,17 +6,48 @@ import (
 	"testing"
 )
 
-// newTestReconciler builds a Reconciler over a fake zone. The config file path
-// is only needed by the tests that read one from disk.
+// newTestReconciler builds a Reconciler over a fake zone and a store in a fresh
+// temporary directory. The config file path is only needed by the tests that
+// read one from disk.
 func newTestReconciler(t *testing.T, configFile string, ignore string) (*Reconciler, *fakeZone) {
 	t.Helper()
 
 	zone := newFakeZone()
 
-	return NewReconciler(zone, configFile, regexp.MustCompile(ignore)), zone
+	return NewReconciler(zone, newTestStore(t), configFile, regexp.MustCompile(ignore)), zone
+}
+
+// seedState puts the store into a known starting position.
+func seedState(t *testing.T, store *Store, wanIP string, routers map[string]Router) {
+	t.Helper()
+
+	if wanIP != "" {
+		if err := store.SetWanIP(wanIP); err != nil {
+			t.Fatalf("seeding WAN IP: %v", err)
+		}
+	}
+
+	for name, router := range routers {
+		if err := store.RecordRouter(name, router); err != nil {
+			t.Fatalf("seeding router %q: %v", name, err)
+		}
+	}
+}
+
+func snapshot(t *testing.T, store *Store) state {
+	t.Helper()
+
+	s, err := store.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error: %v", err)
+	}
+
+	return s
 }
 
 func TestCleanRule(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		rule    string
@@ -52,13 +83,10 @@ func TestCleanRule(t *testing.T) {
 }
 
 func TestCompareStateToConfig_AddsNewRouter(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
-
-	if err := writeState(state{WanIP: "203.0.113.1", Routers: map[string]Router{}}); err != nil {
-		t.Fatalf("seeding state: %v", err)
-	}
+	seedState(t, r.store, "203.0.113.1", nil)
 
 	cfg := TraefikConfig{}
 	cfg.HTTP.Routers = map[string]Router{"web": {Rule: "Host(`web.example.com`)"}}
@@ -77,14 +105,13 @@ func TestCompareStateToConfig_AddsNewRouter(t *testing.T) {
 		t.Errorf("record for 'web' = %+v, want host web.example.com and ip 203.0.113.1", got)
 	}
 
-	s, _ := getState()
-	if _, ok := s.Routers["web"]; !ok {
+	if _, ok := snapshot(t, r.store).Routers["web"]; !ok {
 		t.Error("expected 'web' to be recorded in state after successful add")
 	}
 }
 
 func TestCompareStateToConfig_IgnoredRouterNotAdded(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", `^[a-zA-Z0-9-]+\.local\.example\.com$`)
 
@@ -98,15 +125,13 @@ func TestCompareStateToConfig_IgnoredRouterNotAdded(t *testing.T) {
 	if len(zone.adds) != 0 {
 		t.Fatalf("expected no Add for ignored host, got %v", zone.adds)
 	}
-
-	s, _ := getState()
-	if _, ok := s.Routers["local"]; ok {
+	if _, ok := snapshot(t, r.store).Routers["local"]; ok {
 		t.Error("ignored router should not be recorded in state")
 	}
 }
 
 func TestCompareStateToConfig_FailedAddNotRecorded(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
 	zone.addErr = errStub
@@ -118,24 +143,18 @@ func TestCompareStateToConfig_FailedAddNotRecorded(t *testing.T) {
 		t.Fatalf("CompareStateToConfig() error: %v", err)
 	}
 
-	s, _ := getState()
-	if _, ok := s.Routers["web"]; ok {
+	if _, ok := snapshot(t, r.store).Routers["web"]; ok {
 		t.Error("router must NOT be recorded in state when the zone add fails")
 	}
 }
 
 func TestCompareStateToConfig_RemovesRouter(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
 
 	// Seed state with a router that is no longer present in config.
-	if err := writeState(state{
-		WanIP:   "203.0.113.1",
-		Routers: map[string]Router{"old": {Rule: "Host(`old.example.com`)"}},
-	}); err != nil {
-		t.Fatalf("seeding state: %v", err)
-	}
+	seedState(t, r.store, "203.0.113.1", map[string]Router{"old": {Rule: "Host(`old.example.com`)"}})
 
 	cfg := TraefikConfig{}
 	cfg.HTTP.Routers = map[string]Router{}
@@ -147,24 +166,18 @@ func TestCompareStateToConfig_RemovesRouter(t *testing.T) {
 	if len(zone.removes) != 1 || zone.removes[0] != "old" {
 		t.Fatalf("expected Remove called for 'old', got %v", zone.removes)
 	}
-
-	s, _ := getState()
-	if _, ok := s.Routers["old"]; ok {
+	if _, ok := snapshot(t, r.store).Routers["old"]; ok {
 		t.Error("expected 'old' to be removed from state after successful delete")
 	}
 }
 
 func TestCompareStateToConfig_FailedDeleteKeepsState(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
 	zone.removeErr = errStub
 
-	if err := writeState(state{
-		Routers: map[string]Router{"old": {Rule: "Host(`old.example.com`)"}},
-	}); err != nil {
-		t.Fatalf("seeding state: %v", err)
-	}
+	seedState(t, r.store, "", map[string]Router{"old": {Rule: "Host(`old.example.com`)"}})
 
 	cfg := TraefikConfig{}
 	cfg.HTTP.Routers = map[string]Router{}
@@ -173,20 +186,16 @@ func TestCompareStateToConfig_FailedDeleteKeepsState(t *testing.T) {
 		t.Fatalf("CompareStateToConfig() error: %v", err)
 	}
 
-	s, _ := getState()
-	if _, ok := s.Routers["old"]; !ok {
+	if _, ok := snapshot(t, r.store).Routers["old"]; !ok {
 		t.Error("router must remain in state when the zone delete fails")
 	}
 }
 
 func TestCompareStateToWanIP_UpdatesOnChange(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
-
-	if err := writeState(state{WanIP: "203.0.113.1", Routers: map[string]Router{}}); err != nil {
-		t.Fatalf("seeding state: %v", err)
-	}
+	seedState(t, r.store, "203.0.113.1", nil)
 
 	if err := r.CompareStateToWanIP(context.Background(), "203.0.113.2"); err != nil {
 		t.Fatalf("CompareStateToWanIP() error: %v", err)
@@ -195,42 +204,34 @@ func TestCompareStateToWanIP_UpdatesOnChange(t *testing.T) {
 	if len(zone.setIPs) != 1 || zone.setIPs[0] != "203.0.113.2" {
 		t.Errorf("SetIP calls = %v, want one call with 203.0.113.2", zone.setIPs)
 	}
-
-	s, _ := getState()
-	if s.WanIP != "203.0.113.2" {
-		t.Errorf("state WanIP = %q, want %q", s.WanIP, "203.0.113.2")
+	if got := snapshot(t, r.store).WanIP; got != "203.0.113.2" {
+		t.Errorf("state WanIP = %q, want %q", got, "203.0.113.2")
 	}
 }
 
 func TestCompareStateToWanIP_FailedUpdateNotPersisted(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
 	zone.setIPErr = errStub
 
-	if err := writeState(state{WanIP: "203.0.113.1", Routers: map[string]Router{}}); err != nil {
-		t.Fatalf("seeding state: %v", err)
-	}
+	seedState(t, r.store, "203.0.113.1", nil)
 
 	if err := r.CompareStateToWanIP(context.Background(), "203.0.113.2"); err == nil {
 		t.Fatal("expected an error to propagate when SetIP fails")
 	}
 
 	// The new IP must NOT be persisted, so the next loop retries the update.
-	s, _ := getState()
-	if s.WanIP != "203.0.113.1" {
-		t.Errorf("state WanIP = %q, want unchanged %q after failed update", s.WanIP, "203.0.113.1")
+	if got := snapshot(t, r.store).WanIP; got != "203.0.113.1" {
+		t.Errorf("state WanIP = %q, want unchanged %q after failed update", got, "203.0.113.1")
 	}
 }
 
 func TestCompareStateToWanIP_NoChangeSkipsUpdate(t *testing.T) {
-	useTempState(t)
+	t.Parallel()
 
 	r, zone := newTestReconciler(t, "", "^$")
-
-	if err := writeState(state{WanIP: "203.0.113.1", Routers: map[string]Router{}}); err != nil {
-		t.Fatalf("seeding state: %v", err)
-	}
+	seedState(t, r.store, "203.0.113.1", nil)
 
 	if err := r.CompareStateToWanIP(context.Background(), "203.0.113.1"); err != nil {
 		t.Fatalf("CompareStateToWanIP() error: %v", err)

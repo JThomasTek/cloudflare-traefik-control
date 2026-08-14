@@ -41,7 +41,7 @@ internal/              All application logic (single package `internal`)
   reconcile.go         Reconciler: diffs state against config and WAN IP
   traefik.go           Traefik config parsing + fsnotify file watcher
   wan_ip.go            WAN IP lookup + polling loop
-  state.go             State file (read/write)
+  state.go             Store: the state file, one atomic update at a time
   *_test.go            Unit tests; zone_fake_test.go holds the in-memory Zone
 Dockerfile             Multi-stage build (golang:alpine -> alpine:latest)
 .github/workflows/     CI: build-image (PR/push), publish-image (release)
@@ -56,9 +56,16 @@ IP fetch (via `httptest`), the reconciliation logic in `CompareStateToConfig` /
 assign `api.BaseURL` after constructing the client).
 
 Reconcile tests run against `fakeZone` (`zone_fake_test.go`), the in-memory
-`Zone` adapter, so no Cloudflare access is needed. Add a new dependency by
+`Zone` adapter, and a `Store` over a `t.TempDir()`. No global is mutated by any
+test, so they all call `t.Parallel()` — keep it that way. Add a new dependency by
 putting it behind the `Zone` interface rather than by introducing a package-level
 function var. Run with `go test -race ./...`.
+
+`state_concurrency_test.go` holds the regression test for the lost update
+between the two reconcile paths. Note that `-race` cannot catch that bug — every
+individual access is properly synchronised, so it is a logical lost update, not
+a data race. The test forces the interleaving deterministically by suspending a
+reconcile inside `fakeZone.Add` via `addHook`; a stress test would not do.
 
 ## How it works (control flow)
 
@@ -67,7 +74,8 @@ function var. Run with `go test -race ./...`.
 2. Reads env vars (see below) and compiles the host-ignore regex.
 3. Builds the Cloudflare-backed `Zone` (`NewCloudflareZone`). Fatal if
    `CLOUDFLARE_API_TOKEN` is unset.
-4. Builds the `Reconciler` (`NewReconciler`) over that zone, the config file
+4. Builds the `Store` (`NewStore`), then the `Reconciler` (`NewReconciler`)
+   over that zone and store, the config file
    path and the compiled ignore regex, then runs an initial WAN IP check and an
    initial config reconciliation.
 5. Starts two goroutines: `reconciler.TraefikConfigWatcher` (fsnotify) and
@@ -88,12 +96,26 @@ call never leaves state claiming something that did not happen.
 
 ### State file
 
-- Default location: `/etc/ctc/state.yml` (constants `stateFolder` / `stateFile`
-  in `internal/state.go`). The directory is created (mode `0744`) if missing.
-- A `sync.Mutex` (`mu`) guards all reads/writes of the state file.
+The state file is owned by `Store` in `internal/state.go`, constructed in `main`
+and handed to the `Reconciler`.
+
+- Default location: `/etc/ctc/state.yml` (`internal.DefaultStateFile`), override
+  with `TRAEFIK_STATE_FILE`. `NewStore` creates the directory (mode `0700`) and
+  an empty file if missing, and fails at startup if it cannot — an existing file
+  is never truncated.
 - Persists `WanIP` and a `Routers` map (router name -> rule).
-- Note: `TRAEFIK_STATE_FILE` appears in `.vscode/launch.json` but is **not** read
-  by the code today — the state path is hardcoded.
+- The interface is `Snapshot`, `RecordRouter`, `ForgetRouter`, `SetWanIP`. Each
+  mutating method is a complete read-modify-write under one lock, so the two
+  reconcile goroutines cannot overwrite each other's changes with a copy read
+  beforehand. **Do not add a method that hands the caller a state to mutate and
+  write back** — that reintroduces the lost update the type exists to prevent.
+- The file on disk is the source of truth; nothing is cached between calls, so
+  `Snapshot` always returns a fresh copy that shares nothing with the `Store`.
+- Writes go to a temp file in the same directory and are renamed over the
+  target. A truncated state file would parse cleanly as "nothing is managed" and
+  cause every record to be re-added, so the write must stay atomic.
+- An unparseable state file is an error, never an empty state. Not knowing what
+  we manage must abandon the reconcile, not delete or duplicate records.
 
 ### Record ownership
 
@@ -119,6 +141,7 @@ call never leaves state claiming something that did not happen.
 | `CLOUDFLARE_ZONE_ID` | — | Yes | Target Cloudflare zone. |
 | `TRAEFIK_CONFIG_FILE` | `/etc/traefik/config.yaml` (README) / `/etc/traefik/config.yml` (code default) | Yes | Path to the Traefik dynamic config file. |
 | `TRAEFIK_HOST_IGNORE_REGEX` | `^$` | No | Hostnames matching this regex are skipped (e.g. local-only DNS). |
+| `TRAEFIK_STATE_FILE` | `/etc/ctc/state.yml` | No | Where CTC keeps its state file. The directory is created if missing. |
 | `LOG_LEVEL` | `info` | No | `trace`, `debug`, or default. |
 
 > The README documents the default config path as `config.yaml`, while the code
@@ -198,8 +221,8 @@ state files.
   intentionally minimal (only `http.routers[*].rule`); extend the struct if you
   need more of the Traefik schema.
 - **Concurrency:** the config watcher debounces writes (100ms timer per path);
-  state file access is mutex-guarded. Preserve these guards when touching
-  `traefik.go` / `state.go`.
+  state file access is atomic per update (see **State file**). Preserve these
+  guards when touching `traefik.go` / `state.go`.
 - Match the existing style; gofmt everything.
 
 ## Roadmap / known gaps (from `main.go` TODO + code)
@@ -209,11 +232,12 @@ state files.
 - Ability to disable WAN IP updates.
 - Cloudflare API key + email auth. Only token auth exists; the unreachable
   key/email initializer was removed rather than left dangling.
-- `TRAEFIK_STATE_FILE` env var is referenced in tooling but not honored by code.
-- State file access is still package-level (`getState` / `writeState` over
-  `stateFolder` / `stateFile` globals), and the mutex guards only the individual
-  file reads and writes rather than the whole read-modify-write cycle, so the
-  two reconcile goroutines can lose each other's updates.
+- Configuration is still read ad-hoc from `os.Getenv` in `main.go`; there is no
+  config module, and no validation beyond the API token presence check.
+- The reconcile path still has three near-pass-through layers
+  (`InitialConfigCheck` / `handleConfigChange` over `CompareStateToConfig`,
+  and `InitialWanIPCheck` / `WanIPCheck` over `CompareStateToWanIP`) that differ
+  only in whether the error is returned or logged.
 
 ## Working agreements for assistants
 

@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"sync"
 )
 
 // errStub is a sentinel error reused by tests that make the zone fail.
@@ -12,13 +13,22 @@ var errStub = errors.New("stub zone error")
 // for so tests can assert on the calls, and holds the resulting records so they
 // can assert on the outcome. Ownership comments are deliberately not modelled —
 // they live behind the seam, in ownership.go and the Cloudflare adapter.
+//
+// It is safe for concurrent use, because the reconcile paths it stands behind
+// run from more than one goroutine.
 type fakeZone struct {
+	mu      sync.Mutex
 	records map[string]fakeRecord
 
 	// Injected failures, applied per method.
 	addErr    error
 	setIPErr  error
 	removeErr error
+
+	// addHook, when set, runs on entry to Add before any lock is taken, so a
+	// test can suspend a reconcile part-way through and drive another one past
+	// it. Set it before starting any goroutines.
+	addHook func(router string)
 
 	// Calls received, in order.
 	adds    []string
@@ -36,6 +46,13 @@ func newFakeZone() *fakeZone {
 }
 
 func (z *fakeZone) Add(ctx context.Context, router string, host string, ip string) error {
+	if z.addHook != nil {
+		z.addHook(router)
+	}
+
+	z.mu.Lock()
+	defer z.mu.Unlock()
+
 	z.adds = append(z.adds, router)
 
 	if z.addErr != nil {
@@ -48,6 +65,9 @@ func (z *fakeZone) Add(ctx context.Context, router string, host string, ip strin
 }
 
 func (z *fakeZone) SetIP(ctx context.Context, ip string) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+
 	z.setIPs = append(z.setIPs, ip)
 
 	if z.setIPErr != nil {
@@ -63,6 +83,9 @@ func (z *fakeZone) SetIP(ctx context.Context, ip string) error {
 }
 
 func (z *fakeZone) Remove(ctx context.Context, router string) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+
 	z.removes = append(z.removes, router)
 
 	if z.removeErr != nil {

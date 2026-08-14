@@ -40,8 +40,11 @@ services:
 |         LOG_LEVEL         |                          |    No    |
 |    TRAEFIK_CONFIG_FILE    | /etc/traefik/config.yaml |    Yes   |
 | TRAEFIK_HOST_IGNORE_REGEX |            ^$            |    No    |
+|    TRAEFIK_STATE_FILE     |   /etc/ctc/state.yml     |    No    |
 
 The `TRAEFIK_HOST_IGNORE_REGEX` tells CTC which routes to ignore in the config.yaml file. This can be useful if you have a local DNS that handles routes that you do not want added to Cloudflare.
+
+The `TRAEFIK_STATE_FILE` tells CTC where to keep its record of what it has already done. It defaults to `/etc/ctc/state.yml`, which is why the examples above mount a volume at `/etc/ctc` — keep that volume so a restart picks up where the last run left off instead of re-creating records it already owns.
 
 At this time, the application only supports providing a Cloudflare API token. If there is large interest in there being API key support then it will be implemented.
 
