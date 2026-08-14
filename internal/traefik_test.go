@@ -63,42 +63,34 @@ func TestHandleConfigChange_UnreadableConfigDoesNotDeleteRecords(t *testing.T) {
 	}
 
 	t.Run("missing file", func(t *testing.T) {
-		useTempState(t)
+		t.Parallel()
 
 		r, zone := newTestReconciler(t, filepath.Join(t.TempDir(), "gone.yml"), "^$")
-		if err := writeState(state{WanIP: "203.0.113.1", Routers: seeded}); err != nil {
-			t.Fatalf("seeding state: %v", err)
-		}
+		seedState(t, r.store, "203.0.113.1", seeded)
 
 		r.handleConfigChange(context.Background())
 
 		if len(zone.removes) != 0 {
 			t.Errorf("Remove called for %v; an unreadable config must not delete records", zone.removes)
 		}
-
-		s, _ := getState()
-		if len(s.Routers) != len(seeded) {
-			t.Errorf("state has %d routers, want %d unchanged", len(s.Routers), len(seeded))
+		if got := len(snapshot(t, r.store).Routers); got != len(seeded) {
+			t.Errorf("state has %d routers, want %d unchanged", got, len(seeded))
 		}
 	})
 
 	t.Run("malformed yaml", func(t *testing.T) {
-		useTempState(t)
+		t.Parallel()
 
 		r, zone := newTestReconciler(t, writeTempConfig(t, "http: [this is not: valid yaml"), "^$")
-		if err := writeState(state{WanIP: "203.0.113.1", Routers: seeded}); err != nil {
-			t.Fatalf("seeding state: %v", err)
-		}
+		seedState(t, r.store, "203.0.113.1", seeded)
 
 		r.handleConfigChange(context.Background())
 
 		if len(zone.removes) != 0 {
 			t.Errorf("Remove called for %v; a malformed config must not delete records", zone.removes)
 		}
-
-		s, _ := getState()
-		if len(s.Routers) != len(seeded) {
-			t.Errorf("state has %d routers, want %d unchanged", len(s.Routers), len(seeded))
+		if got := len(snapshot(t, r.store).Routers); got != len(seeded) {
+			t.Errorf("state has %d routers, want %d unchanged", got, len(seeded))
 		}
 	})
 }

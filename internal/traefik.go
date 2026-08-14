@@ -65,16 +65,16 @@ func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watch
 		waitTime = 100 * time.Millisecond
 
 		// Keep track of the timers, as path -> timer.
-		mu     sync.Mutex
-		timers = make(map[string]*time.Timer)
+		timersMu sync.Mutex
+		timers   = make(map[string]*time.Timer)
 
 		// Callback we run.
 		eventHandler = func(e fsnotify.Event) {
 			r.handleConfigChange(ctx)
 
-			mu.Lock()
+			timersMu.Lock()
 			delete(timers, e.Name)
-			mu.Unlock()
+			timersMu.Unlock()
 		}
 	)
 
@@ -87,17 +87,17 @@ func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watch
 			}
 
 			if event.Name == r.configFile && event.Has(fsnotify.Write) {
-				mu.Lock()
+				timersMu.Lock()
 				t, ok := timers[event.Name]
-				mu.Unlock()
+				timersMu.Unlock()
 
 				if !ok {
 					t = time.AfterFunc(math.MaxInt64, func() { eventHandler(event) })
 					t.Stop()
 
-					mu.Lock()
+					timersMu.Lock()
 					timers[event.Name] = t
-					mu.Unlock()
+					timersMu.Unlock()
 				}
 
 				t.Reset(waitTime)

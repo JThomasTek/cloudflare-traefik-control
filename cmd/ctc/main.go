@@ -40,6 +40,12 @@ func main() {
 		traefikConfigFile = os.Getenv("TRAEFIK_CONFIG_FILE")
 	}
 
+	stateFile := internal.DefaultStateFile
+
+	if os.Getenv("TRAEFIK_STATE_FILE") != "" {
+		stateFile = os.Getenv("TRAEFIK_STATE_FILE")
+	}
+
 	hostIgnoreRegexString := "^$"
 
 	if os.Getenv("TRAEFIK_HOST_IGNORE_REGEX") != "" {
@@ -62,8 +68,13 @@ func main() {
 
 	//-------- Finish configuration --------//
 
+	store, err := internal.NewStore(stateFile)
+	if err != nil {
+		log.Fatal().Err(err).Msg("")
+	}
+
 	ctx := context.Background()
-	reconciler := internal.NewReconciler(zone, traefikConfigFile, hostIgnoreRegex)
+	reconciler := internal.NewReconciler(zone, store, traefikConfigFile, hostIgnoreRegex)
 
 	// Run initial WAN IP check
 	err = reconciler.InitialWanIPCheck(ctx)

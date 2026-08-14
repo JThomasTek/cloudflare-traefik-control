@@ -14,15 +14,18 @@ import (
 // and the WAN IP loop carry no configuration of their own.
 type Reconciler struct {
 	zone            Zone
+	store           *Store
 	configFile      string
 	hostIgnoreRegex *regexp.Regexp
 }
 
-// NewReconciler wires a Reconciler to the zone it manages, the Traefik config
-// file it reads, and the regex of hostnames it must leave alone.
-func NewReconciler(zone Zone, configFile string, hostIgnoreRegex *regexp.Regexp) *Reconciler {
+// NewReconciler wires a Reconciler to the zone it manages, the store holding
+// what it has already done, the Traefik config file it reads, and the regex of
+// hostnames it must leave alone.
+func NewReconciler(zone Zone, store *Store, configFile string, hostIgnoreRegex *regexp.Regexp) *Reconciler {
 	return &Reconciler{
 		zone:            zone,
+		store:           store,
 		configFile:      configFile,
 		hostIgnoreRegex: hostIgnoreRegex,
 	}
@@ -49,12 +52,14 @@ func cleanRule(rule string) (string, error) {
 func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikConfig) error {
 	log.Debug().Msg("Comparing state file to config")
 
-	s, err := getState()
+	// A snapshot is enough to decide what to do. Each change is committed on
+	// its own as it succeeds, so a slow zone call cannot hold up the other
+	// reconcile path, and neither path can overwrite the other's work with a
+	// copy taken before it happened.
+	s, err := r.store.Snapshot()
 	if err != nil {
 		return err
 	}
-
-	changed := false
 
 	// Check if any new subdomains were added to the config
 	for k, v := range config.HTTP.Routers {
@@ -81,8 +86,9 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 			continue
 		}
 
-		s.Routers[k] = v
-		changed = true
+		if err := r.store.RecordRouter(k, v); err != nil {
+			return err
+		}
 	}
 
 	// Check if any subdomains were removed from the config
@@ -97,12 +103,9 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 			continue
 		}
 
-		delete(s.Routers, k)
-		changed = true
-	}
-
-	if changed {
-		return writeState(s)
+		if err := r.store.ForgetRouter(k); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -111,7 +114,7 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 func (r *Reconciler) CompareStateToWanIP(ctx context.Context, wanIP string) error {
 	log.Debug().Msg("Comparing state file WAN IP to actual WAN IP")
 
-	s, err := getState()
+	s, err := r.store.Snapshot()
 	if err != nil {
 		return err
 	}
@@ -120,8 +123,6 @@ func (r *Reconciler) CompareStateToWanIP(ctx context.Context, wanIP string) erro
 		return nil
 	}
 
-	s.WanIP = wanIP
-
 	// Only persist the new IP to the state file once the update succeeds;
 	// otherwise a transient failure would be masked on the next loop (no IP
 	// change detected) and the DNS records would stay stale.
@@ -129,5 +130,5 @@ func (r *Reconciler) CompareStateToWanIP(ctx context.Context, wanIP string) erro
 		return err
 	}
 
-	return writeState(s)
+	return r.store.SetWanIP(wanIP)
 }
