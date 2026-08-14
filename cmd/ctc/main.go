@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,8 +34,6 @@ func main() {
 	}
 
 	//-------- Retrieve configuration from environment variables --------//
-	var err error
-
 	traefikConfigFile := "/etc/traefik/config.yml"
 
 	if os.Getenv("TRAEFIK_CONFIG_FILE") != "" {
@@ -52,25 +51,28 @@ func main() {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	if os.Getenv("CLOUDFLARE_API_TOKEN") != "" {
-		err = internal.InitializeCloudflareAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"), os.Getenv("CLOUDFLARE_ZONE_ID"))
-		if err != nil {
-			log.Fatal().Err(err).Msg("")
-		}
-	} else {
+	if os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
 		log.Fatal().Msg("No Cloudflare API token provided")
+	}
+
+	zone, err := internal.NewCloudflareZone(os.Getenv("CLOUDFLARE_API_TOKEN"), os.Getenv("CLOUDFLARE_ZONE_ID"))
+	if err != nil {
+		log.Fatal().Err(err).Msg("")
 	}
 
 	//-------- Finish configuration --------//
 
+	ctx := context.Background()
+	reconciler := internal.NewReconciler(zone, traefikConfigFile, hostIgnoreRegex)
+
 	// Run initial WAN IP check
-	err = internal.InitialWanIPCheck()
+	err = reconciler.InitialWanIPCheck(ctx)
 	if err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
 	// Run initial config check
-	if err = internal.InitialConfigCheck(traefikConfigFile, hostIgnoreRegex); err != nil {
+	if err = reconciler.InitialConfigCheck(ctx); err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
@@ -84,8 +86,8 @@ func main() {
 
 	// Start go routines for watching WAN IP and Traefik config changes
 	log.Info().Msg("Watching for config changes")
-	go internal.TraefikConfigWatcher(traefikConfigWatcher, traefikConfigFile, hostIgnoreRegex)
-	go internal.WanIPCheck(60)
+	go reconciler.TraefikConfigWatcher(ctx, traefikConfigWatcher)
+	go reconciler.WanIPCheck(ctx, 60)
 
 	// Get config file info
 	configFileInfo, err := os.Lstat(traefikConfigFile)

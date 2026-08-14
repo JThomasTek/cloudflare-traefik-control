@@ -1,9 +1,9 @@
 package internal
 
 import (
+	"context"
 	"math"
 	"os"
-	"regexp"
 	"sync"
 	"time"
 
@@ -41,20 +41,25 @@ func readTraefikConfig(filename string) (TraefikConfig, error) {
 	return config, nil
 }
 
-func handleConfigChange(filename string, hostIgnoreRegex *regexp.Regexp) {
+func (r *Reconciler) handleConfigChange(ctx context.Context) {
 	log.Debug().Msg("Handling config change")
-	traefikConfig, err := readTraefikConfig(filename)
+	traefikConfig, err := readTraefikConfig(r.configFile)
 	if err != nil {
+		// Stop here rather than reconciling against the zero value. An
+		// unreadable or half-written config parses to no routers at all, which
+		// the reconcile would read as "every router was removed" and delete
+		// every record CTC manages in the zone.
 		log.Error().Err(err).Msg("")
+		return
 	}
 
-	err = CompareStateToConfig(traefikConfig, hostIgnoreRegex)
+	err = r.CompareStateToConfig(ctx, traefikConfig)
 	if err != nil {
 		log.Error().Err(err).Msg("")
 	}
 }
 
-func TraefikConfigWatcher(w *fsnotify.Watcher, filename string, hostIgnoreRegex *regexp.Regexp) {
+func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watcher) {
 	var (
 		// Wait 100ms for new events; each new event resets the timer.
 		waitTime = 100 * time.Millisecond
@@ -65,7 +70,7 @@ func TraefikConfigWatcher(w *fsnotify.Watcher, filename string, hostIgnoreRegex 
 
 		// Callback we run.
 		eventHandler = func(e fsnotify.Event) {
-			handleConfigChange(filename, hostIgnoreRegex)
+			r.handleConfigChange(ctx)
 
 			mu.Lock()
 			delete(timers, e.Name)
@@ -81,7 +86,7 @@ func TraefikConfigWatcher(w *fsnotify.Watcher, filename string, hostIgnoreRegex 
 				return
 			}
 
-			if event.Name == filename && event.Has(fsnotify.Write) {
+			if event.Name == r.configFile && event.Has(fsnotify.Write) {
 				mu.Lock()
 				t, ok := timers[event.Name]
 				mu.Unlock()
@@ -107,14 +112,14 @@ func TraefikConfigWatcher(w *fsnotify.Watcher, filename string, hostIgnoreRegex 
 	}
 }
 
-func InitialConfigCheck(filename string, hostIgnoreRegex *regexp.Regexp) error {
+func (r *Reconciler) InitialConfigCheck(ctx context.Context) error {
 	log.Debug().Msg("Initial config check")
-	traefikConfig, err := readTraefikConfig(filename)
+	traefikConfig, err := readTraefikConfig(r.configFile)
 	if err != nil {
 		return err
 	}
 
-	err = CompareStateToConfig(traefikConfig, hostIgnoreRegex)
+	err = r.CompareStateToConfig(ctx, traefikConfig)
 	if err != nil {
 		return err
 	}
