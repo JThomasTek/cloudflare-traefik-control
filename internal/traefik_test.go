@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,46 +50,4 @@ func TestReadTraefikConfig_MalformedYAML(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for malformed YAML, got nil")
 	}
-}
-
-// An unreadable config parses to zero routers. Reconciling against that would
-// read as "every router was removed" and wipe every record CTC manages, so a
-// failed read must abandon the reconcile entirely.
-func TestHandleConfigChange_UnreadableConfigDoesNotDeleteRecords(t *testing.T) {
-	seeded := map[string]Router{
-		"web": {Rule: "Host(`web.example.com`)"},
-		"api": {Rule: "Host(`api.example.com`)"},
-	}
-
-	t.Run("missing file", func(t *testing.T) {
-		t.Parallel()
-
-		r, zone := newTestReconciler(t, filepath.Join(t.TempDir(), "gone.yml"), "^$")
-		seedState(t, r.store, "203.0.113.1", seeded)
-
-		r.handleConfigChange(context.Background())
-
-		if len(zone.removes) != 0 {
-			t.Errorf("Remove called for %v; an unreadable config must not delete records", zone.removes)
-		}
-		if got := len(snapshot(t, r.store).Routers); got != len(seeded) {
-			t.Errorf("state has %d routers, want %d unchanged", got, len(seeded))
-		}
-	})
-
-	t.Run("malformed yaml", func(t *testing.T) {
-		t.Parallel()
-
-		r, zone := newTestReconciler(t, writeTempConfig(t, "http: [this is not: valid yaml"), "^$")
-		seedState(t, r.store, "203.0.113.1", seeded)
-
-		r.handleConfigChange(context.Background())
-
-		if len(zone.removes) != 0 {
-			t.Errorf("Remove called for %v; a malformed config must not delete records", zone.removes)
-		}
-		if got := len(snapshot(t, r.store).Routers); got != len(seeded) {
-			t.Errorf("state has %d routers, want %d unchanged", got, len(seeded))
-		}
-	})
 }

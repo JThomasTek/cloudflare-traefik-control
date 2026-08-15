@@ -41,25 +41,11 @@ func readTraefikConfig(filename string) (TraefikConfig, error) {
 	return config, nil
 }
 
-func (r *Reconciler) handleConfigChange(ctx context.Context) {
-	log.Debug().Msg("Handling config change")
-	traefikConfig, err := readTraefikConfig(r.configFile)
-	if err != nil {
-		// Stop here rather than reconciling against the zero value. An
-		// unreadable or half-written config parses to no routers at all, which
-		// the reconcile would read as "every router was removed" and delete
-		// every record CTC manages in the zone.
-		log.Error().Err(err).Msg("")
-		return
-	}
-
-	err = r.CompareStateToConfig(ctx, traefikConfig)
-	if err != nil {
-		log.Error().Err(err).Msg("")
-	}
-}
-
-func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watcher) {
+// WatchTraefikConfig reconciles the zone whenever the Traefik config file is
+// written, until w is closed. Writes are debounced: each event resets a 100ms
+// timer, so an editor or a template renderer touching the file several times in
+// quick succession produces one reconcile.
+func (r *Reconciler) WatchTraefikConfig(ctx context.Context, w *fsnotify.Watcher) {
 	var (
 		// Wait 100ms for new events; each new event resets the timer.
 		waitTime = 100 * time.Millisecond
@@ -70,7 +56,10 @@ func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watch
 
 		// Callback we run.
 		eventHandler = func(e fsnotify.Event) {
-			r.handleConfigChange(ctx)
+			log.Debug().Msg("Handling config change")
+			if err := r.ReconcileConfig(ctx); err != nil {
+				log.Error().Err(err).Msg("")
+			}
 
 			timersMu.Lock()
 			delete(timers, e.Name)
@@ -110,19 +99,4 @@ func (r *Reconciler) TraefikConfigWatcher(ctx context.Context, w *fsnotify.Watch
 			log.Error().Err(err).Msg("")
 		}
 	}
-}
-
-func (r *Reconciler) InitialConfigCheck(ctx context.Context) error {
-	log.Debug().Msg("Initial config check")
-	traefikConfig, err := readTraefikConfig(r.configFile)
-	if err != nil {
-		return err
-	}
-
-	err = r.CompareStateToConfig(ctx, traefikConfig)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

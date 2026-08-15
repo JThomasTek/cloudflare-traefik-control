@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"syscall"
+	"time"
 
 	"github.com/JThomasTek/traefik-config-to-cloudflare/internal"
 	"github.com/fsnotify/fsnotify"
@@ -73,17 +76,24 @@ func main() {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	ctx := context.Background()
+	// Cancelled on SIGINT/SIGTERM so a `docker stop` unwinds the reconcile
+	// loops instead of having the process killed part-way through one.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	reconciler := internal.NewReconciler(zone, store, traefikConfigFile, hostIgnoreRegex)
 
-	// Run initial WAN IP check
-	err = reconciler.InitialWanIPCheck(ctx)
-	if err != nil {
+	// Establish the starting position before anything starts watching. The WAN
+	// IP comes first: reconciling the config without one defers every add.
+	//
+	// Both are fatal. Reconciliation is only ever driven by events from here on
+	// (see docs/adr/0001), so there is nothing that would retry a failed start
+	// — exiting hands that job to the container's restart policy.
+	if err = reconciler.ReconcileWanIP(ctx); err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	// Run initial config check
-	if err = reconciler.InitialConfigCheck(ctx); err != nil {
+	if err = reconciler.ReconcileConfig(ctx); err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
@@ -97,26 +107,23 @@ func main() {
 
 	// Start go routines for watching WAN IP and Traefik config changes
 	log.Info().Msg("Watching for config changes")
-	go reconciler.TraefikConfigWatcher(ctx, traefikConfigWatcher)
-	go reconciler.WanIPCheck(ctx, 60)
+	go reconciler.WatchTraefikConfig(ctx, traefikConfigWatcher)
+	go reconciler.WatchWanIP(ctx, 60*time.Second)
 
-	// Get config file info
-	configFileInfo, err := os.Lstat(traefikConfigFile)
-	if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
-
-	// Verify the file provided is not a directory
-	if configFileInfo.IsDir() {
-		log.Fatal().Msgf("%s is a directory\n", traefikConfigFile)
-	}
-
-	// Add the config file to the watcher
+	// The config file itself is not checked here: the reconcile above already
+	// read it, and failed fatally if it was missing, unreadable, or a
+	// directory.
+	//
+	// The directory is what gets watched, not the file — editors and template
+	// renderers replace config files rather than writing them in place, and a
+	// watch on the old inode would go quiet after the first such write.
+	// WatchTraefikConfig filters events back down to the config file.
 	err = traefikConfigWatcher.Add(filepath.Dir(traefikConfigFile))
 	if err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
 
-	// Run in an infinite loop
-	select {}
+	// Block until a signal cancels the context, then let the watchers unwind.
+	<-ctx.Done()
+	log.Info().Msg("Shutting down")
 }

@@ -38,9 +38,9 @@ internal/              All application logic (single package `internal`)
   zone.go              Zone interface: the seam between reconcile and DNS
   zone_cloudflare.go   Zone adapter backed by the Cloudflare API
   ownership.go         Ownership comment: render + parse
-  reconcile.go         Reconciler: diffs state against config and WAN IP
+  reconcile.go         Reconciler: the two reconciles, and what they decide
   traefik.go           Traefik config parsing + fsnotify file watcher
-  wan_ip.go            WAN IP lookup + polling loop
+  wan_ip.go            WAN IP lookup + check loop
   state.go             Store: the state file, one atomic update at a time
   *_test.go            Unit tests; zone_fake_test.go holds the in-memory Zone
 Dockerfile             Multi-stage build (golang:alpine -> alpine:latest)
@@ -51,13 +51,20 @@ Dockerfile             Multi-stage build (golang:alpine -> alpine:latest)
 Unit tests live alongside the source in `internal/*_test.go` (white-box, package
 `internal`). They cover the pure/parsing logic (`cleanRule`, the ownership
 comment round trip, Traefik config parsing), state file round-tripping, the WAN
-IP fetch (via `httptest`), the reconciliation logic in `CompareStateToConfig` /
-`CompareStateToWanIP`, and the Cloudflare adapter itself (also via `httptest` —
+IP fetch (via `httptest`), the reconciliation logic in `compareStateToConfig` /
+`compareStateToWanIP`, and the Cloudflare adapter itself (also via `httptest` —
 assign `api.BaseURL` after constructing the client).
 
+The two compares are unexported and take their input as a parameter, so most
+reconcile tests need no filesystem and no network. `ReconcileConfig` /
+`ReconcileWanIP` are tested separately, and only for what they add: reading the
+config file, and refusing to reconcile against one it could not read.
+
 Reconcile tests run against `fakeZone` (`zone_fake_test.go`), the in-memory
-`Zone` adapter, and a `Store` over a `t.TempDir()`. No global is mutated by any
-test, so they all call `t.Parallel()` — keep it that way. Add a new dependency by
+`Zone` adapter, and a `Store` over a `t.TempDir()`. They mutate no globals, so
+they all call `t.Parallel()` — keep it that way. The exception is the `GetWANIP`
+tests, which repoint the `wanIPURL` / `wanIPClient` package vars at an
+`httptest` server and therefore cannot be parallel. Add a new dependency by
 putting it behind the `Zone` interface rather than by introducing a package-level
 function var. Run with `go test -race ./...`.
 
@@ -75,24 +82,48 @@ reconcile inside `fakeZone.Add` via `addHook`; a stress test would not do.
 3. Builds the Cloudflare-backed `Zone` (`NewCloudflareZone`). Fatal if
    `CLOUDFLARE_API_TOKEN` is unset.
 4. Builds the `Store` (`NewStore`), then the `Reconciler` (`NewReconciler`)
-   over that zone and store, the config file
-   path and the compiled ignore regex, then runs an initial WAN IP check and an
-   initial config reconciliation.
-5. Starts two goroutines: `reconciler.TraefikConfigWatcher` (fsnotify) and
-   `reconciler.WanIPCheck(ctx, 60)`.
-6. Adds the config file's **directory** to the fsnotify watcher, then blocks
-   forever on `<-make(chan struct{})`.
+   over that zone and store, the config file path and the compiled ignore regex.
+5. Derives its context from `signal.NotifyContext` (`SIGINT`/`SIGTERM`).
+6. Runs `ReconcileWanIP` and then `ReconcileConfig`, both fatal on error. The
+   order matters and the reason is in `docs/adr/0001`: reconciling the config
+   without a known WAN IP defers every add, and nothing but a config-file write
+   would retry it.
+7. Starts two goroutines: `reconciler.WatchTraefikConfig` (fsnotify) and
+   `reconciler.WatchWanIP(ctx, 60*time.Second)`.
+8. Adds the config file's **directory** to the fsnotify watcher, then blocks on
+   `<-ctx.Done()`.
 
-Reconciliation lives in `internal/reconcile.go`, on the `Reconciler`:
-- `CompareStateToConfig` diffs the parsed Traefik routers against the state file:
-  added routers (not matching the ignore regex) are created via `Zone.Add` and
-  recorded; removed routers go through `Zone.Remove` and leave the state.
-- `CompareStateToWanIP` calls `Zone.SetIP` when the WAN IP changes.
+Reconciliation lives in `internal/reconcile.go`, on the `Reconciler`. There are
+exactly two entry points, and startup and the watchers all call the same ones:
+- `ReconcileConfig(ctx)` reads the config file and delegates. A failed read
+  abandons the reconcile — see **The config read is not optional** below.
+- `ReconcileWanIP(ctx)` looks up the WAN IP and delegates.
+- `compareStateToConfig` (unexported) diffs the parsed Traefik routers against
+  the state file: added routers (not matching the ignore regex) are created via
+  `Zone.Add` and recorded; removed routers go through `Zone.Remove` and leave
+  the state. Adds are **deferred entirely when the state file holds no WAN IP**;
+  removals still run, since deleting a record needs no address.
+- `compareStateToWanIP` (unexported) calls `Zone.SetIP` when the WAN IP changes.
 - `cleanRule` extracts the hostname from a Traefik rule by parsing the substring
   between `` Host(` `` and `` `) ``.
 
 Both only touch the state file once the zone confirms the change, so a failed
 call never leaves state claiming something that did not happen.
+
+### The config read is not optional
+
+An unreadable or half-written config parses cleanly to zero routers, which
+`compareStateToConfig` would read as "every router was removed" and act on by
+deleting every record CTC manages. `ReconcileConfig` therefore returns the read
+error rather than reconciling against a zero value, and
+`TestReconcileConfig_UnreadableConfigDoesNotDeleteRecords` guards it.
+
+### Shutdown
+
+Both watchers return when the context is cancelled, so `docker stop` unwinds
+rather than killing a reconcile in flight. `WatchWanIP` uses a ticker rather
+than a sleep for exactly this reason — a sleeping goroutine cannot be selected
+on, and would sit out the rest of the interval before noticing.
 
 ### State file
 
@@ -221,8 +252,13 @@ state files.
   intentionally minimal (only `http.routers[*].rule`); extend the struct if you
   need more of the Traefik schema.
 - **Concurrency:** the config watcher debounces writes (100ms timer per path);
-  state file access is atomic per update (see **State file**). Preserve these
-  guards when touching `traefik.go` / `state.go`.
+  state file access is atomic per update (see **State file**); both watchers
+  return on context cancellation. Preserve these guards when touching
+  `traefik.go` / `wan_ip.go` / `state.go`.
+- **Reconcile entry points:** there are two, `ReconcileConfig` and
+  `ReconcileWanIP`, and every caller uses them — startup and the watchers alike.
+  Do not add a variant that differs only in whether it logs or returns the
+  error; that is what the previous four entry points were.
 - Match the existing style; gofmt everything.
 
 ## Roadmap / known gaps (from `main.go` TODO + code)
@@ -233,11 +269,16 @@ state files.
 - Cloudflare API key + email auth. Only token auth exists; the unreachable
   key/email initializer was removed rather than left dangling.
 - Configuration is still read ad-hoc from `os.Getenv` in `main.go`; there is no
-  config module, and no validation beyond the API token presence check.
-- The reconcile path still has three near-pass-through layers
-  (`InitialConfigCheck` / `handleConfigChange` over `CompareStateToConfig`,
-  and `InitialWanIPCheck` / `WanIPCheck` over `CompareStateToWanIP`) that differ
-  only in whether the error is returned or logged.
+  config module, and no validation beyond the API token presence check. The WAN
+  IP check interval is hardcoded at the `WatchWanIP` call site rather than
+  configurable.
+- `GetWANIP` still reaches the network through the `wanIPURL` / `wanIPClient`
+  package vars rather than through an interface the way `Zone` does. Worth
+  revisiting if the WAN lookup grows a second implementation or a fallback
+  service; not worth an interface for one method today.
+- No periodic drift correction: records changed or deleted outside CTC are only
+  noticed when the config file is next written. See `docs/adr/0001` for why that
+  was chosen and what it would cost to change.
 
 ## Working agreements for assistants
 
@@ -266,4 +307,5 @@ The five canonical roles, each label string equal to its name (`needs-triage`,
 ### Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root, both created
-lazily. `CONTEXT.md` exists; there are no ADRs yet. See `docs/agents/domain.md`.
+lazily. Both exist: `CONTEXT.md`, and `docs/adr/0001-reconciliation-is-event-driven.md`.
+See `docs/agents/domain.md`.

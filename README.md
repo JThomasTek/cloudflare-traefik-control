@@ -31,6 +31,9 @@ services:
             - /etc/traefik:/etc/traefik
 ```
 
+CTC stops on `SIGTERM`, so `docker stop` lets the current reconcile finish
+instead of killing the process part-way through one.
+
 ## Environment Variables
 
 |       Variable Name       |       Default Value      | Required |

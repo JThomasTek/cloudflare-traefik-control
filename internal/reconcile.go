@@ -49,7 +49,37 @@ func cleanRule(rule string) (string, error) {
 	return rule[hostStartIndex : hostStartIndex+endOffset], nil
 }
 
-func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikConfig) error {
+// ReconcileConfig brings the zone into agreement with the Traefik config file.
+// It is the whole config-driven reconcile: startup and the file watcher both
+// call this and nothing else.
+func (r *Reconciler) ReconcileConfig(ctx context.Context) error {
+	config, err := readTraefikConfig(r.configFile)
+	if err != nil {
+		// Stop here rather than reconciling against the zero value. An
+		// unreadable or half-written config parses to no routers at all, which
+		// the reconcile would read as "every router was removed" and delete
+		// every record CTC manages in the zone.
+		return err
+	}
+
+	return r.compareStateToConfig(ctx, config)
+}
+
+// ReconcileWanIP brings the zone into agreement with the host's current WAN IP.
+// It is the whole WAN-driven reconcile: startup and the check loop both call
+// this and nothing else.
+func (r *Reconciler) ReconcileWanIP(ctx context.Context) error {
+	wanIP, err := GetWANIP()
+	if err != nil {
+		return err
+	}
+
+	log.Info().Str("WAN_IP", wanIP).Msg("WAN IP check")
+
+	return r.compareStateToWanIP(ctx, wanIP)
+}
+
+func (r *Reconciler) compareStateToConfig(ctx context.Context, config TraefikConfig) error {
 	log.Debug().Msg("Comparing state file to config")
 
 	// A snapshot is enough to decide what to do. Each change is committed on
@@ -61,35 +91,51 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 		return err
 	}
 
-	// Check if any new subdomains were added to the config
-	for k, v := range config.HTTP.Routers {
-		if _, ok := s.Routers[k]; ok {
-			continue
-		}
+	// Adding a record means naming an address for it, and until the first WAN IP
+	// check has landed we do not have one. Creating the record anyway would
+	// point it at nothing, and the router would then be recorded in the state
+	// file, so no later reconcile would revisit it. Defer the adds instead.
+	//
+	// Startup checks the WAN IP before it reconciles the config, so this only
+	// guards against a future caller getting that order wrong — but the cost of
+	// it going unguarded is a zone full of records pointing nowhere.
+	if s.WanIP == "" {
+		log.Warn().Msg("No WAN IP known yet, deferring router adds")
+	} else {
+		// Check if any new subdomains were added to the config
+		for k, v := range config.HTTP.Routers {
+			if _, ok := s.Routers[k]; ok {
+				continue
+			}
 
-		host, err := cleanRule(v.Rule)
-		if err != nil {
-			log.Error().Err(err).Msg("")
-			continue
-		}
+			host, err := cleanRule(v.Rule)
+			if err != nil {
+				log.Error().Err(err).Msg("")
+				continue
+			}
 
-		// Only add subdomain if it doesn't match the ignore regex
-		if r.hostIgnoreRegex.MatchString(host) {
-			log.Debug().Msgf("Ignoring subdomain %s", host)
-			continue
-		}
+			// Only add subdomain if it doesn't match the ignore regex
+			if r.hostIgnoreRegex.MatchString(host) {
+				log.Debug().Msgf("Ignoring subdomain %s", host)
+				continue
+			}
 
-		// Only record the router in the state file once the zone confirms the
-		// record was created, so a failed add does not leave state out of sync.
-		if err := r.zone.Add(ctx, k, host, s.WanIP); err != nil {
-			log.Error().Err(err).Msg("")
-			continue
-		}
+			// Only record the router in the state file once the zone confirms
+			// the record was created, so a failed add does not leave state out
+			// of sync.
+			if err := r.zone.Add(ctx, k, host, s.WanIP); err != nil {
+				log.Error().Err(err).Msg("")
+				continue
+			}
 
-		if err := r.store.RecordRouter(k, v); err != nil {
-			return err
+			if err := r.store.RecordRouter(k, v); err != nil {
+				return err
+			}
 		}
 	}
+
+	// Removals run whether or not we know our own address — deleting a record
+	// does not need one.
 
 	// Check if any subdomains were removed from the config
 	for k := range s.Routers {
@@ -111,7 +157,7 @@ func (r *Reconciler) CompareStateToConfig(ctx context.Context, config TraefikCon
 	return nil
 }
 
-func (r *Reconciler) CompareStateToWanIP(ctx context.Context, wanIP string) error {
+func (r *Reconciler) compareStateToWanIP(ctx context.Context, wanIP string) error {
 	log.Debug().Msg("Comparing state file WAN IP to actual WAN IP")
 
 	s, err := r.store.Snapshot()
